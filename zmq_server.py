@@ -10,11 +10,11 @@ import conf
 
 class ZmqServer(object):
 
-    def __init__(self, hwm, address, interval, QP_TIMER):
+    def __init__(self, hwm, address, interval, timer):
         self.hwm = hwm
         self.address = address
         self.interval = interval
-        self.QP_TIMER = QP_TIMER
+        self.QP_TIMER = timer
         self.socket = None
         self.receive_timer = None
 
