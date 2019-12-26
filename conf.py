@@ -11,6 +11,7 @@ import util
 ZMQ_SERVER_HWM = 200000
 DELAY = 20  # ms
 ZMQ_ADDRESS = "tcp://*:8888"
+ZMQ_CLIENT_ADDRESS = "tcp://127.0.0.1:8888"  # zmq客户端连接地址
 QP_TIMER = 100  # 每次最大处理100个消息
 # zmq end
 
@@ -23,7 +24,8 @@ MYSQL_NAME = "makemoney"
 MYSQL_SETTINGS_TABLE = "settings"
 
 # TcpServer start
-port = 6667
+PORT = 6667
+KEEPALIVE_TIMER = 300  #s tcp 连接之后 300s内没有收到 S2G_keepalive 超时退出
 # TcpServer end
 
 # Server start

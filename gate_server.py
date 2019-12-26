@@ -21,7 +21,6 @@ if __name__ == "__main__":
         "log/gate_server.log",
         colorfy=True
     )
-    logging.info("%s : starting at port:%d...", MyTCPServer.__name__, conf.port)
 
     handlers = [
         (r'/',                              Conn),
@@ -29,6 +28,10 @@ if __name__ == "__main__":
 
         (r'/msgpack-snappy-skip/',          Conn, dict(
             msgpack=True, compress="snappy", skip_size=512, binary=True, conn_tag='MP-SP-skip')),
+        (r'/msgpack-lz4-skip/',             Conn, dict(
+            msgpack=True, compress="lz4", skip_size=512, binary=True, conn_tag='MP-LZ4-skip')),
+        (r'/lz4-skip/',                     Conn, dict(
+            compress="lz4", skip_size=512, binary=True, conn_tag='LZ4-skip')),
 
         (r'/crypt/',                        Conn, dict(crypt=True, binary=True, conn_tag='CB')),
         (r'/crypts/',                       Conn, dict(crypt=True, simple=True, binary=True, conn_tag='CSB')),
@@ -50,9 +53,10 @@ if __name__ == "__main__":
     '''
 
     # 初始化TCP连接 监听控制端口
-    MyTCPServer(CtrlServer, conf.port, http_server).run()
+    logging.info("%s : starting at port:%d...", MyTCPServer.__name__, conf.PORT)
+    MyTCPServer(CtrlServer, conf.PORT, http_server).run()
 
-    # 启动清理定时器
+    # 启动定时器
     Conn.on_server_start()
     
     # 启动消息队列 并开始接收定时器
@@ -61,6 +65,7 @@ if __name__ == "__main__":
     def server_stop():
         # 服务器结束
         logging.info('stopping gate...')
+        zmq_server.close()
         ioloop.IOLoop.instance().stop()
 
     def sig_stop(sig, frame):

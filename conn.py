@@ -14,6 +14,7 @@ import tornado
 from tornado.ioloop import PeriodicCallback
 from tornado.websocket import WebSocketHandler
 import msgpack
+import lz4.block
 import snappy
 import zmq
 
@@ -23,6 +24,7 @@ import conf
 import msg
 import connect_log
 from zmq_server import zmq_server
+from tcp_server import CtrlServer
 
 
 class ClientError(Exception):
@@ -119,13 +121,16 @@ class Conn(WebSocketHandler, util.LogObject):
             self._loads = msgpack.loads
             self._dumps = msgpack.dumps
 
-        # 压缩: 无/snappy
+        # 压缩: 无/snappy/lz4
         self._compress = None
         self._decompress = None
         compress = kwargs.get("compress")
         if compress == "snappy":
             self._compress = snappy.compress
             self._decompress = snappy.decompress
+        elif compress == "lz4":
+            self._compress = lz4.block.compress
+            self._decompress = lz4.block.decompress
         # 压缩跳过(长度): 首字节表示是否压缩: \0x00 未压缩 \x01 压缩了
         self._compress_skip_size = kwargs.get("skip_size", 0)
         
@@ -175,6 +180,9 @@ class Conn(WebSocketHandler, util.LogObject):
             if close_time + int(conf.DELAY_CLOSE) <= time.time():
                 del Conn.close_conns[conn_id]
 
+        # 检测tcp活性
+        CtrlServer.keepalive_on_second()
+
     @classmethod
     def on_receive_timer(cls):
         zmq_ = cls.zmq_server
@@ -186,21 +194,26 @@ class Conn(WebSocketHandler, util.LogObject):
                 conn_id = msg["data"]["conn_id"]
                 # 验证消息的连续性
                 msg_id = msg["msg_id"]
-                if msg_id != cls.handle_msg_id:
+                if msg_id > cls.handle_msg_id:
+                    # 消息丢失
                     logging.error('The msg_id %d is lost! data:%s' % (msg_id, msg))
                     cls.handle_msg_id = msg_id
+                if msg_id < cls.handle_msg_id:
+                    # 消息重复发送
+                    logging.error('The msg_id %d is Duplicate sending! data:%s' % (msg_id, msg))
+                    continue
                 cls.handle_msg_id += 1
 
                 zmq_data = msg["data"]["message"]
                 if zmq_type != 'S2G_broadcast':
                     client = cls.conns.get(conn_id)
                     if not client:
-                        raise ClientError("conn_id:%s is not in conns" % conn_id)
+                        raise ClientError("type:%s; conn_id:%s is not in conns" % (zmq_type, conn_id))
                 if zmq_type.startswith('S2G_'):
                     if zmq_type == "S2G_message":
                         client.send_message(zmq_data)
                     else:
-                        # 处理S2G_broadcast
+                        # 处理S2G_broadcast和控制消息
                         other_handler = getattr(cls, zmq_type, None)
                         if other_handler:
                             other_handler(msg["data"])
@@ -212,7 +225,7 @@ class Conn(WebSocketHandler, util.LogObject):
                 break
             except ClientError:
                 if conn_id not in cls.close_conns:
-                    logging.error("ClientError:\n%s\n" % format_exc())
+                    logging.error("ClientError! type:%s; conn_id:%s is not in conns" % (zmq_type, conn_id))
                 else:
                     if zmq_type == 'S2G_closed_ack':
                         del cls.close_conns[conn_id]
@@ -226,6 +239,7 @@ class Conn(WebSocketHandler, util.LogObject):
     
     @classmethod
     def S2G_broadcast(cls, data):
+        logging.debug("S2G_broadcast[data:%s]" % data)
         conns_by_pg_tag = {}
         conn_ids = data.get("conn_id")
         message = data.get("message")
@@ -244,6 +258,7 @@ class Conn(WebSocketHandler, util.LogObject):
 
     @classmethod
     def S2G_close(cls, data):
+        logging.debug("S2G_close[data:%s]" % data)
         conn_id = data.get("conn_id")
         assert isinstance(conn_id, int), "conn_id is not int"
         conn = cls.conns[conn_id]
@@ -255,10 +270,12 @@ class Conn(WebSocketHandler, util.LogObject):
     def S2G_closed_ack(cls, data):
         """
         正常情况下：由于收到这个消息之前已经close，因此在on_receive_timer中会抛出ClientError
-        不会进入到这里，若进入到这里，说明已经是异常情况，记录错误日志
+        不会进入到这里，若进入到这里，说明已经是异常情况，记录错误日志, 并清除对应字典
         """
         conn_id = data.get("conn_id")
         logging.error("conn_id:%s,G2S_close_ack:%s" % (conn_id, data))
+        cls.conns.pop(conn_id, None)
+        cls.close_conns.pop(conn_id, None)
     
     def initialize(self, **kwargs):
         """必须有的函数"""
@@ -434,15 +451,15 @@ class Conn(WebSocketHandler, util.LogObject):
         except:
             # 解码成功
             if message_decoded:
-                self.exception("Exception: message_str: %r", message_str_tmp)
+                self.exception("message_decoded, Exception: message_str: %r", message_str_tmp)
             else:
                 self.exception(
-                    "Exception: message_str: %r%s",
+                    "message_decoded_error, Exception: message_str: %r%s",
                     message_str,
                     "(tmp:%r)" % message_str_tmp if message_str_tmp is not message_str else ""
                 )
             # 记录异常日志
-            self.error(message_type or "", "%r" % message_str_tmp, format_exc())
+            self.error("on_message_error", message_type or "", "%r" % message_str_tmp, format_exc())
         return False
 
     # 基本消息接口 ######################################################################################################
@@ -517,7 +534,7 @@ class Conn(WebSocketHandler, util.LogObject):
                         Conn.total_send_time * 1000000.0 / Conn.total_send
                     )
             except:
-                pass
+                logging.error("send to client error:\n%s", format_exc())
 
             return {"message_str": message_str, "tag": self.pg_tag, "packed": packed}
 

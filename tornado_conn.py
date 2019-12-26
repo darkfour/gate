@@ -3,6 +3,7 @@
 
 import json
 import time
+from traceback import format_exc
 
 import msgpack
 from tornado.iostream import StreamClosedError
@@ -37,42 +38,21 @@ class Conn(util.LogObject):
     @gen.coroutine
     def run(self):
         """运行逻辑"""
-
-        # 连接(客户端连接才需要)
-        if self.closed():
-            try:
-                yield self.connect()
-            except:
-                self.on_connect_failed()
-                raise
-
-        # 连接成功
         try:
             self.stream.set_close_callback(self.on_closed)
             yield self.on_connected()
         except:
-            self.exception("")
+            self.exception("TCP connect error: \n%s", format_exc())
 
         # 消息处理
         while not self.closed():
             try:
                 yield self._recv_message()
             except StreamClosedError:
+                self.exception("StreamClosedError: \n%s", format_exc())
                 break
-            # except KeyboardInterrupt:
-            #     self.error("KeyboardInterrupt! CLOSE...")
-            #     self.close()
             except:
-                self.exception("")
-
-    @gen.coroutine
-    def connect(self):
-        """连接(服务器): 客户端连接才需要"""
-        pass
-
-    def on_connect_failed(self):
-        """连接(服务器)失败回调: 客户端连接才需要"""
-        self.error("connect failed!")
+                self.exception("TCP receive error: \n%s", format_exc())
 
     @gen.coroutine
     def on_connected(self):
@@ -92,18 +72,6 @@ class Conn(util.LogObject):
         """连接断开通知"""
         self.info("closed.")
 
-    def speed(self):
-        """接收消息速率"""
-        if self.message_cnt == 0:
-            self.message_start = time.time()
-        self.message_cnt += 1
-        if self.message_cnt % 10000 == 0:
-            self.info(
-                "%d, %d/s",
-                self.message_cnt,
-                self.message_cnt / (time.time() - self.message_start)
-            )
-
     @gen.coroutine
     def _recv_message(self):
         """接收消息"""
@@ -111,9 +79,6 @@ class Conn(util.LogObject):
         msg = self.loads(msg_buffer[:-len(Conn.MAGIC)])
         msgtype = msg["type"]
         data = msg.get("data", {})
-
-        # self.speed()
-
         msg_handler = getattr(self, msgtype, None)
         if msg_handler:
             yield msg_handler(data)
